@@ -2,173 +2,288 @@ import hashlib
 from rapidfuzz.fuzz import ratio
 
 
-def normalize_text(text):
-    """Normalize text before comparison."""
-    return " ".join(str(text).lower().strip().split())
+# =========================================================
+# NORMALIZE TEXT
+# =========================================================
+
+def normalize_text(value):
+    """Convert text into a standard comparable format."""
+
+    if value is None:
+        return ""
+
+    return str(value).strip().lower()
 
 
-def generate_hash(name, email, phone):
+# =========================================================
+# CREATE DATA HASH
+# =========================================================
+
+def create_data_hash(name, email, phone):
     """
-    Generate a SHA-256 hash for exact duplicate detection.
+    Create a SHA-256 hash using normalized
+    name, email and phone.
     """
 
-    normalized_data = (
-        f"{normalize_text(name)}|"
-        f"{str(email).lower().strip()}|"
-        f"{str(phone).strip()}"
+    normalized_name = normalize_text(name)
+    normalized_email = normalize_text(email)
+    normalized_phone = normalize_text(phone)
+
+    combined = (
+        normalized_name
+        + "|"
+        + normalized_email
+        + "|"
+        + normalized_phone
     )
 
     return hashlib.sha256(
-        normalized_data.encode("utf-8")
+        combined.encode("utf-8")
     ).hexdigest()
 
 
-def calculate_similarity(new_record, existing_record):
-    """
-    Calculate similarity between a new record
-    and an existing record.
-    """
+# =========================================================
+# FIELD SIMILARITY
+# =========================================================
 
-    name_score = ratio(
-        normalize_text(new_record["name"]),
-        normalize_text(existing_record["name"])
-    )
+def calculate_field_similarity(new_value, old_value):
+    """Calculate similarity between two individual fields."""
 
-    email_score = ratio(
-        str(new_record["email"]).lower().strip(),
-        str(existing_record["email"]).lower().strip()
-    )
+    new_value = normalize_text(new_value)
+    old_value = normalize_text(old_value)
 
-    phone_score = ratio(
-        str(new_record["phone"]).strip(),
-        str(existing_record["phone"]).strip()
-    )
+    if not new_value or not old_value:
+        return 0
 
-    # Weighted similarity score
-    total_score = (
-        (name_score * 0.4)
-        + (email_score * 0.3)
-        + (phone_score * 0.3)
-    )
+    return ratio(new_value, old_value)
 
-    return round(total_score, 2)
 
+# =========================================================
+# CLASSIFY RECORD
+# =========================================================
 
 def classify_record(new_record, existing_records):
-    """
-    Classify the new record as:
 
-    Unique     -> Safe to add
-    Duplicate  -> Already exists
-    Review     -> Possible false positive
+    """
+    Classify a new record as:
+
+    Unique
+    Review
+    Duplicate
+
+    The system compares name, email and phone separately.
     """
 
-    # Generate hash for the new record
-    new_hash = generate_hash(
-        new_record["name"],
-        new_record["email"],
-        new_record["phone"]
+    new_name = normalize_text(
+        new_record.get("name")
     )
 
-    # -----------------------------------------
-    # STEP 1: EXACT DUPLICATE CHECK
-    # -----------------------------------------
+    new_email = normalize_text(
+        new_record.get("email")
+    )
+
+    new_phone = normalize_text(
+        new_record.get("phone")
+    )
+
+    new_hash = create_data_hash(
+        new_name,
+        new_email,
+        new_phone
+    )
+
+    # -----------------------------------------------------
+    # No existing records
+    # -----------------------------------------------------
+
+    if not existing_records:
+
+        return {
+            "classification": "Unique",
+            "similarity": 0,
+            "matched_record": None,
+            "data_hash": new_hash,
+            "reason": "No existing records found."
+        }
+
+    best_match = None
+    best_score = 0
+    best_reason = ""
+
+    # -----------------------------------------------------
+    # Compare with every existing record
+    # -----------------------------------------------------
 
     for record in existing_records:
 
-        if new_hash == record["data_hash"]:
+        old_name = normalize_text(
+            record.get("name")
+        )
+
+        old_email = normalize_text(
+            record.get("email")
+        )
+
+        old_phone = normalize_text(
+            record.get("phone")
+        )
+
+        # -------------------------------------------------
+        # Exact field matching
+        # -------------------------------------------------
+
+        name_exact = (
+            new_name == old_name
+            and new_name != ""
+        )
+
+        email_exact = (
+            new_email == old_email
+            and new_email != ""
+        )
+
+        phone_exact = (
+            new_phone == old_phone
+            and new_phone != ""
+        )
+
+        # -------------------------------------------------
+        # Field similarity
+        # -------------------------------------------------
+
+        name_score = calculate_field_similarity(
+            new_name,
+            old_name
+        )
+
+        email_score = calculate_field_similarity(
+            new_email,
+            old_email
+        )
+
+        phone_score = calculate_field_similarity(
+            new_phone,
+            old_phone
+        )
+
+        # -------------------------------------------------
+        # Exact duplicate
+        # -------------------------------------------------
+
+        if (
+            name_exact
+            and email_exact
+            and phone_exact
+        ):
 
             return {
                 "classification": "Duplicate",
-                "similarity": 100.0,
+                "similarity": 100,
                 "matched_record": record,
                 "data_hash": new_hash,
-                "reason": "Exact duplicate found."
+                "reason": (
+                    "Name, email and phone number "
+                    "exactly match an existing record."
+                )
             }
 
-    # -----------------------------------------
-    # STEP 2: SIMILARITY CHECK
-    # -----------------------------------------
+        # -------------------------------------------------
+        # Strong duplicate evidence
+        # -------------------------------------------------
 
-    highest_score = 0
-    best_match = None
+        if (
+            email_exact
+            and phone_exact
+        ):
 
-    for record in existing_records:
+            score = 100
 
-        existing_record = {
-            "name": record["name"],
-            "email": record["email"],
-            "phone": record["phone"]
-        }
+            reason = (
+                "Email and phone number exactly "
+                "match an existing record."
+            )
 
-        score = calculate_similarity(
-            new_record,
-            existing_record
-        )
+        elif (
+            phone_exact
+            and name_score >= 85
+        ):
 
-        if score > highest_score:
-            highest_score = score
+            score = (
+                name_score * 0.6
+                + phone_score * 0.4
+            )
+
+            reason = (
+                "Phone number exactly matches and "
+                "the name is highly similar."
+            )
+
+        elif (
+            email_exact
+            and name_score >= 85
+        ):
+
+            score = (
+                name_score * 0.6
+                + email_score * 0.4
+            )
+
+            reason = (
+                "Email exactly matches and "
+                "the name is highly similar."
+            )
+
+        else:
+
+            # -------------------------------------------------
+            # General weighted similarity
+            # -------------------------------------------------
+
+            score = (
+                name_score * 0.40
+                + email_score * 0.35
+                + phone_score * 0.25
+            )
+
+            reason = (
+                f"Name similarity: {name_score:.2f}%, "
+                f"Email similarity: {email_score:.2f}%, "
+                f"Phone similarity: {phone_score:.2f}%."
+            )
+
+        # -------------------------------------------------
+        # Store best match
+        # -------------------------------------------------
+
+        if score > best_score:
+
+            best_score = score
             best_match = record
+            best_reason = reason
 
-    # -----------------------------------------
-    # STEP 3: CLASSIFICATION
-    # -----------------------------------------
+    # =====================================================
+    # FINAL CLASSIFICATION
+    # =====================================================
 
-    if highest_score >= 90:
+    # Exact or extremely strong duplicate
+    if best_score >= 95:
 
         classification = "Duplicate"
-        reason = "Highly similar record detected."
 
-    elif highest_score >= 70:
+    # Potential duplicate / false positive
+    elif best_score >= 80:
 
         classification = "Review"
-        reason = "Potential duplicate or false positive."
 
+    # Clearly different
     else:
 
         classification = "Unique"
-        reason = "No significant duplicate found."
 
     return {
         "classification": classification,
-        "similarity": highest_score,
+        "similarity": round(best_score, 2),
         "matched_record": best_match,
         "data_hash": new_hash,
-        "reason": reason
+        "reason": best_reason
     }
-
-
-# -----------------------------------------
-# SIMPLE TEST
-# -----------------------------------------
-
-if __name__ == "__main__":
-
-    existing_records = [
-        {
-            "id": 1,
-            "name": "Bharathkumar",
-            "email": "qwerty@gmail.com",
-            "phone": "9876543210",
-            "data_hash": generate_hash(
-                "Bharathkumar",
-                "qwerty@gmail.com",
-                "9876543210"
-            )
-        }
-    ]
-
-    new_record = {
-        "name": "Bharathkumar",
-        "email": "qwerty@gmail.com",
-        "phone": "9876543210"
-    }
-
-    result = classify_record(
-        new_record,
-        existing_records
-    )
-
-    print("Classification:", result["classification"])
-    print("Similarity:", result["similarity"])
-    print("Reason:", result["reason"])

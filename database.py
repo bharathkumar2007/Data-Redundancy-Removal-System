@@ -1,15 +1,25 @@
-import sqlite3
+import os
 from pathlib import Path
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+
 
 # ---------------------------------------------------------
-# DATABASE CONFIGURATION
+# LOAD ENVIRONMENT VARIABLES
 # ---------------------------------------------------------
 
-DATABASE_DIR = Path("data")
-DATABASE_DIR.mkdir(exist_ok=True)
+load_dotenv()
 
-DATABASE_PATH = DATABASE_DIR / "database.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+if not DATABASE_URL:
+    raise ValueError(
+        "DATABASE_URL was not found. "
+        "Please check your .env file."
+    )
 
 
 # ---------------------------------------------------------
@@ -17,15 +27,12 @@ DATABASE_PATH = DATABASE_DIR / "database.db"
 # ---------------------------------------------------------
 
 def get_connection():
-    """Create and return a connection to the SQLite database."""
+    """Create and return a PostgreSQL database connection."""
 
-    connection = sqlite3.connect(
-        DATABASE_PATH
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=RealDictCursor
     )
-
-    connection.row_factory = sqlite3.Row
-
-    return connection
 
 
 # ---------------------------------------------------------
@@ -33,41 +40,45 @@ def get_connection():
 # ---------------------------------------------------------
 
 def create_tables():
-    """Create the required database tables."""
+    """Create the required PostgreSQL tables."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    # Main table for verified/unique records
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL,
-            phone TEXT NOT NULL,
-            data_hash TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL DEFAULT 'Unique',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    try:
+        with connection.cursor() as cursor:
 
-    # Table for duplicate and review detections
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS duplicate_logs (
-            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            submitted_name TEXT NOT NULL,
-            submitted_email TEXT NOT NULL,
-            submitted_phone TEXT NOT NULL,
-            matched_record_id INTEGER,
-            similarity_score REAL,
-            decision TEXT NOT NULL,
-            reason TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            # Main records table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS records (
+                    id BIGSERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    phone TEXT NOT NULL,
+                    data_hash TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'Unique',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    connection.commit()
-    connection.close()
+            # Duplicate / review logs
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS duplicate_logs (
+                    log_id BIGSERIAL PRIMARY KEY,
+                    submitted_name TEXT NOT NULL,
+                    submitted_email TEXT NOT NULL,
+                    submitted_phone TEXT NOT NULL,
+                    matched_record_id BIGINT,
+                    similarity_score DOUBLE PRECISION,
+                    decision TEXT NOT NULL,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+        connection.commit()
+
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------
@@ -75,22 +86,32 @@ def create_tables():
 # ---------------------------------------------------------
 
 def get_all_records():
-    """Return all records from the database."""
+    """Return all records from the cloud database."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        SELECT *
-        FROM records
-        ORDER BY id DESC
-    """)
+    try:
+        with connection.cursor() as cursor:
 
-    rows = cursor.fetchall()
+            cursor.execute("""
+                SELECT
+                    id,
+                    name,
+                    email,
+                    phone,
+                    data_hash,
+                    status,
+                    created_at
+                FROM records
+                ORDER BY id DESC
+            """)
 
-    connection.close()
+            rows = cursor.fetchall()
 
-    return [dict(row) for row in rows]
+            return [dict(row) for row in rows]
+
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------
@@ -107,40 +128,44 @@ def insert_record(
     """Insert a verified unique record."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
     try:
+        with connection.cursor() as cursor:
 
-        cursor.execute("""
-            INSERT INTO records (
-                name,
-                email,
-                phone,
-                data_hash,
-                status
-            )
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            name,
-            email,
-            phone,
-            data_hash,
-            status
-        ))
+            try:
 
-        connection.commit()
+                cursor.execute("""
+                    INSERT INTO records (
+                        name,
+                        email,
+                        phone,
+                        data_hash,
+                        status
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    name,
+                    email,
+                    phone,
+                    data_hash,
+                    status
+                ))
 
-        record_id = cursor.lastrowid
+                result = cursor.fetchone()
 
+                connection.commit()
+
+                return True, result["id"]
+
+            except psycopg2.IntegrityError:
+
+                connection.rollback()
+
+                return False, None
+
+    finally:
         connection.close()
-
-        return True, record_id
-
-    except sqlite3.IntegrityError:
-
-        connection.close()
-
-        return False, None
 
 
 # ---------------------------------------------------------
@@ -159,31 +184,35 @@ def add_duplicate_log(
     """Store duplicate or review information."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        INSERT INTO duplicate_logs (
-            submitted_name,
-            submitted_email,
-            submitted_phone,
-            matched_record_id,
-            similarity_score,
-            decision,
-            reason
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        submitted_name,
-        submitted_email,
-        submitted_phone,
-        matched_record_id,
-        similarity_score,
-        decision,
-        reason
-    ))
+    try:
+        with connection.cursor() as cursor:
 
-    connection.commit()
-    connection.close()
+            cursor.execute("""
+                INSERT INTO duplicate_logs (
+                    submitted_name,
+                    submitted_email,
+                    submitted_phone,
+                    matched_record_id,
+                    similarity_score,
+                    decision,
+                    reason
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
+                submitted_name,
+                submitted_email,
+                submitted_phone,
+                matched_record_id,
+                similarity_score,
+                decision,
+                reason
+            ))
+
+        connection.commit()
+
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------
@@ -191,22 +220,34 @@ def add_duplicate_log(
 # ---------------------------------------------------------
 
 def get_duplicate_logs():
-    """Return duplicate/review detection logs."""
+    """Return duplicate and review detection logs."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        SELECT *
-        FROM duplicate_logs
-        ORDER BY log_id DESC
-    """)
+    try:
+        with connection.cursor() as cursor:
 
-    rows = cursor.fetchall()
+            cursor.execute("""
+                SELECT
+                    log_id,
+                    submitted_name,
+                    submitted_email,
+                    submitted_phone,
+                    matched_record_id,
+                    similarity_score,
+                    decision,
+                    reason,
+                    created_at
+                FROM duplicate_logs
+                ORDER BY log_id DESC
+            """)
 
-    connection.close()
+            rows = cursor.fetchall()
 
-    return [dict(row) for row in rows]
+            return [dict(row) for row in rows]
+
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------
@@ -217,18 +258,21 @@ def get_record_count():
     """Return the total number of stored records."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        SELECT COUNT(*) AS count
-        FROM records
-    """)
+    try:
+        with connection.cursor() as cursor:
 
-    result = cursor.fetchone()
+            cursor.execute("""
+                SELECT COUNT(*) AS count
+                FROM records
+            """)
 
-    connection.close()
+            result = cursor.fetchone()
 
-    return result["count"]
+            return result["count"]
+
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------
@@ -239,28 +283,31 @@ def get_status_counts():
     """Return the number of records for each status."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("""
-        SELECT status, COUNT(*) AS count
-        FROM records
-        GROUP BY status
-    """)
+    try:
+        with connection.cursor() as cursor:
 
-    rows = cursor.fetchall()
+            cursor.execute("""
+                SELECT status, COUNT(*) AS count
+                FROM records
+                GROUP BY status
+            """)
 
-    connection.close()
+            rows = cursor.fetchall()
 
-    counts = {
-        "Unique": 0,
-        "Review": 0,
-        "Duplicate": 0
-    }
+            counts = {
+                "Unique": 0,
+                "Review": 0,
+                "Duplicate": 0
+            }
 
-    for row in rows:
-        counts[row["status"]] = row["count"]
+            for row in rows:
+                counts[row["status"]] = row["count"]
 
-    return counts
+            return counts
+
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------
@@ -268,28 +315,56 @@ def get_status_counts():
 # ---------------------------------------------------------
 
 def delete_all_data():
-    """Delete all application data."""
+    """Delete all application records and logs."""
 
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute("DELETE FROM records")
-    cursor.execute("DELETE FROM duplicate_logs")
+    try:
+        with connection.cursor() as cursor:
 
-    connection.commit()
-    connection.close()
+            cursor.execute(
+                "DELETE FROM duplicate_logs"
+            )
+
+            cursor.execute(
+                "DELETE FROM records"
+            )
+
+        connection.commit()
+
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------
-# TEST DATABASE
+# TEST DATABASE CONNECTION
 # ---------------------------------------------------------
 
 if __name__ == "__main__":
 
-    create_tables()
+    try:
 
-    print("Database and tables created successfully.")
+        connection = get_connection()
 
-    print(
-        f"Database location: {DATABASE_PATH}"
-    )
+        with connection.cursor() as cursor:
+
+            cursor.execute("""
+                SELECT version()
+            """)
+
+            result = cursor.fetchone()
+
+            print("✅ Connected to Supabase PostgreSQL.")
+            print("PostgreSQL version:")
+            print(result["version"])
+
+        connection.close()
+
+        create_tables()
+
+        print("✅ Database tables created successfully.")
+
+    except Exception as error:
+
+        print("❌ Database connection failed.")
+        print("Error:", error)

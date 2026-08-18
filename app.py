@@ -160,7 +160,7 @@ elif page == "Add Data":
 
         name = st.text_input(
             "Name",
-            placeholder="Example: Bharathkumar"
+            placeholder="Enter your name"
         )
 
         email = st.text_input(
@@ -170,7 +170,7 @@ elif page == "Add Data":
 
         phone = st.text_input(
             "Phone Number",
-            placeholder="Example: 9876543210"
+            placeholder="Enter your phone number"
         )
 
         submitted = st.form_submit_button(
@@ -510,5 +510,5 @@ st.sidebar.divider()
 
 st.sidebar.info(
     "Data Redundancy Removal System\n\n"
-    "Python + Streamlit + SQLite + RapidFuzz"
+    "Python + Streamlit + PostgreSQL + RapidFuzz"
 )
