@@ -1,5 +1,7 @@
 # Data Redundancy Removal System
+## Live Application
 
+[Open Data Redundancy Removal System](https://data-redundancy-removal-system-8ojfmk2ur7cjyihejhtggi.streamlit.app/)
 ## Project Overview
 
 The Data Redundancy Removal System is a cloud-based application designed to identify duplicate, unique, and potentially similar records before they are stored in a database.
